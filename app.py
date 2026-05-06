@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from folium.plugins import MarkerCluster
+import math
 
-st.set_page_config(page_title="Red Nacional TVS - Postventa", layout="wide")
+st.set_page_config(page_title="Red Nacional TVS", layout="wide")
 
-st.markdown("## 🛠️ Red Nacional de Servicios Técnicos - Ubicaciones Exactas")
+st.markdown("## 🛠️ Red Nacional de Servicios Técnicos - Vista Individual")
 
-CENTROS_CIUDAD = {
+# Coordenadas exactas/centro de ciudades
+CITY_COORDS = {
     "SANTO DOMINGO": [-0.2530, -79.1754], "MANTA": [-0.9513, -80.7139],
     "EL COCA": [-0.4665, -76.9872], "RIOBAMBA": [-1.6708, -78.6534],
     "RIOBAMBA GUANO": [-1.6110, -78.6315], "PORTOVIEJO": [-1.0547, -80.4533],
@@ -22,78 +23,63 @@ CENTROS_CIUDAD = {
 
 @st.cache_data
 def load_data():
-    # Intenta cargar el CSV, primero busca el de tu formulario, si no, el que yo generé
     try:
-        df = pd.read_csv("SERVICIOS TECNICOS TVS 2026.xlsx - Respuestas de formulario 1.csv")
-    except:
+        # Cargamos el archivo que subiste
         df = pd.read_csv("talleres_streamlit_completo.csv")
+    except:
+        df = pd.read_csv("SERVICIOS TECNICOS TVS 2026.xlsx - Respuestas de formulario 1.csv")
     
-    # Limpia los espacios en los nombres de las columnas
     df.columns = df.columns.str.strip()
     
-    # FUNCION SEGURA PARA OBTENER COORDENADAS
-    def get_coords(row):
-        # row.get() evita el "KeyError" si la columna no existe
-        lat = row.get('lat')
-        lon = row.get('lon')
-        
-        # Si existen y no están vacías, usa la ubicación exacta
-        if pd.notnull(lat) and pd.notnull(lon):
-            return float(lat), float(lon)
-        
-        # Si no existen, usa el centro de la ciudad de forma segura
-        ciudad = str(row.get('CUIDAD', '')).strip().upper()
-        return CENTROS_CIUDAD.get(ciudad, [-1.8312, -78.1834])
+    lats, lons = [], []
+    city_counts = {}
 
-    # Aplicar la función a cada fila
-    df['lat_final'], df['lon_final'] = zip(*df.apply(get_coords, axis=1))
+    for _, row in df.iterrows():
+        city = str(row.get('CUIDAD', '')).strip().upper()
+        # Intentar usar lat/lon del archivo, si no, usar centro de ciudad
+        lat_val = row.get('lat')
+        lon_val = row.get('lon')
+        
+        if pd.notnull(lat_val) and pd.notnull(lon_val) and lat_val != -1.8312:
+            base_lat, base_lon = float(lat_val), float(lon_val)
+        else:
+            base_lat, base_lon = CITY_COORDS.get(city, [-1.8312, -78.1834])
+        
+        # DISPERSIÓN: Si hay más de uno en la misma coordenada, los separamos
+        if city in city_counts:
+            count = city_counts[city]
+            angle = count * (2 * math.pi / 6) # Distribución en círculo
+            radius = 0.008 # Distancia entre pines
+            lats.append(base_lat + (radius * math.cos(angle)))
+            lons.append(base_lon + (radius * math.sin(angle)))
+            city_counts[city] += 1
+        else:
+            lats.append(base_lat)
+            lons.append(base_lon)
+            city_counts[city] = 1
+            
+    df['lat_viz'] = lats
+    df['lon_viz'] = lons
     return df
 
-try:
-    df = load_data()
+df = load_data()
 
-    # Panel lateral
-    st.sidebar.header("Gestión de Red")
-    ciudades = sorted(df["CUIDAD"].unique())
-    seleccion = st.sidebar.multiselect("Filtrar por Ciudad:", ciudades)
+# Filtros
+ciudades = sorted(df["CUIDAD"].unique())
+seleccion = st.sidebar.multiselect("Filtrar por Ciudad:", ciudades)
+df_mapa = df[df["CUIDAD"].isin(seleccion)] if seleccion else df
 
-    df_filtered = df[df["CUIDAD"].isin(seleccion)] if seleccion else df
+# Mapa SIN MarkerCluster para ver los pines individuales
+m = folium.Map(location=[-1.8312, -78.1834], zoom_start=7, tiles="CartoDB dark_matter")
 
-    # Crear Mapa
-    m = folium.Map(location=[-1.8312, -78.1834], zoom_start=7, tiles="CartoDB dark_matter")
-    marker_cluster = MarkerCluster(spiderfy_on_max_zoom=True).add_to(m)
+for i, row in df_mapa.iterrows():
+    popup_info = f"<b>{row['NOMBRE DEL TALLER ']}</b><br>{row['DIRECCION']}"
+    folium.Marker(
+        location=[row['lat_viz'], row['lon_viz']],
+        popup=folium.Popup(popup_info, max_width=250),
+        tooltip=row['NOMBRE DEL TALLER '],
+        icon=folium.Icon(color="red", icon="wrench", prefix="fa")
+    ).add_to(m)
 
-    for i, row in df_filtered.iterrows():
-        # Extracción segura de datos para el popup
-        nombre = row.get('NOMBRE DEL TALLER ', 'Taller Sin Nombre')
-        direccion = row.get('DIRECCION', 'Sin dirección')
-        contacto = row.get('NUMEROS DE CONTACTO (MINIMO 2)', 'N/A')
-        responsable = row.get('PERSONA RESPONSABLE', 'N/A')
-
-        popup_content = f"""
-        <div style='font-family: Arial; font-size: 12px; width: 180px;'>
-            <b style='color:#E67E22;'>{nombre}</b><br>
-            <b>Dirección:</b> {direccion}<br>
-            <b>Tel:</b> {contacto}<br>
-            <b>Resp:</b> {responsable}
-        </div>
-        """
-        
-        folium.Marker(
-            location=[row['lat_final'], row['lon_final']],
-            popup=folium.Popup(popup_content, max_width=250),
-            tooltip=nombre,
-            icon=folium.Icon(color="orange", icon="wrench", prefix="fa")
-        ).add_to(marker_cluster)
-
-    st_folium(m, width="100%", height=600)
-
-    st.write(f"### Detalle de la Red ({len(df_filtered)} talleres)")
-    
-    # Ocultar las columnas técnicas en la tabla
-    columnas_a_ocultar = ['lat_final', 'lon_final', 'lat', 'lon']
-    columnas_mostrar = [col for col in df_filtered.columns if col not in columnas_a_ocultar]
-    st.dataframe(df_filtered[columnas_mostrar], use_container_width=True)
-
-except Exception as e:
-    st.error(f"Error en la carga de datos: {e}")
+st_folium(m, width="100%", height=550)
+st.dataframe(df_mapa.drop(columns=['lat_viz', 'lon_viz']), use_container_width=True)
